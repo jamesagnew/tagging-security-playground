@@ -1,10 +1,46 @@
+# Running This Test
 
-### From Synthea Directory
+This page describes the instructions for executing this test. Note that this test assumes a Smile CDR instance with the following settings:
 
-Run Synthea
+* Audit log and transaction log have been disabled
+* FHIR Storage module is using MongoDB
 
-> ./run_synthea -p 400000
+Note: These instructions assume that you have checked out `synthea` and `tagging-security-playground` into the same parent directory.
 
-Move files into staging area
+# Generate Synthea Files to Upload
 
+* Navigate to the synthea directory
+
+```
+cd synthea
+```
+
+* Run Synthea
+
+```
+./run_synthea -p 1000000
+```
+
+* Move files into staging area
+
+```
 find output/fhir -name "*.json" -exec mv -v {}  ../tagging-security-playground/src/main/data/new_synthea_files \;
+```
+
+# Stage the Synthea Files
+
+In this step we pre-process the Synthea files to reduce their size and filter their contents to only Patient and Observation resources.
+
+* Navigate to the playground directory
+
+```
+cd ../tagging-security-playground
+```
+
+* Run the stager application
+
+```
+mvn clean compile exec:java -Dexec.mainClass=Step1_FileStager
+```
+
+

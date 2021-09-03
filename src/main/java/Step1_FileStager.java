@@ -1,18 +1,22 @@
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.util.StopWatch;
-import org.apache.commons.io.Charsets;
+import com.google.common.collect.Lists;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang3.concurrent.BasicThreadFactory;
-import org.glassfish.jaxb.core.api.impl.NameConverter;
-import org.hibernate.search.engine.environment.thread.impl.ThreadPoolProviderImpl;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.Validate;
 import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Encounter;
 import org.hl7.fhir.r4.model.Observation;
 import org.hl7.fhir.r4.model.Patient;
 import org.hl7.fhir.r4.model.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -21,48 +25,223 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPOutputStream;
 
+@SuppressWarnings("BusyWait")
 public class Step1_FileStager {
+	public static final File NEW_SYNTHEA_FILES = new File("src/main/data/new_synthea_files");
+	public static final File STAGED_SYNTHEA_FILES = new File("src/main/data/staged_synthea_files");
+
 	private static final Logger ourLog = LoggerFactory.getLogger(Step1_FileStager.class);
-
 	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+	private static final BlockingQueue<FileAndName> ourInputFilesQueue = new ArrayBlockingQueue<>(1000);
+	private static final BlockingQueue<FileAndName> ourOutputFilesQueue = new ArrayBlockingQueue<>(1000);
+	private static final Map<String, AtomicInteger> resourceTypeToCount = Collections.synchronizedMap(new HashMap<>());
+	private static final AtomicBoolean ourFinishedReading = new AtomicBoolean(false);
+	private static final AtomicBoolean ourFinishedWriting = new AtomicBoolean(false);
+	private static final AtomicInteger ourTotalFileCount = new AtomicInteger(0);
+	private static final AtomicInteger ourTotalProcessedFileCount = new AtomicInteger(0);
+	private static final AtomicInteger ourTotalWrittenFileCount = new AtomicInteger(0);
+	private static Exception ourException;
+	private static List<String> TAG_20PCT = Lists.newArrayList(
+		"20PCT-0",
+		"20PCT-1",
+		"20PCT-2",
+		"20PCT-3",
+		"20PCT-4",
+		"20PCT-5",
+		"20PCT-6",
+		"20PCT-7",
+		"20PCT-8",
+		"20PCT-9"
+	);
+	private static List<String> TAG_1PCT = Lists.newArrayList(
+		"1PCT-0",
+		"1PCT-1",
+		"1PCT-2",
+		"1PCT-3",
+		"1PCT-4",
+		"1PCT-5",
+		"1PCT-6",
+		"1PCT-7",
+		"1PCT-8",
+		"1PCT-9"
+	);
+	private static List<String> TAG_POINT1PCT = Lists.newArrayList(
+		"POINT1PCT-0",
+		"POINT1PCT-1",
+		"POINT1PCT-2",
+		"POINT1PCT-3",
+		"POINT1PCT-4",
+		"POINT1PCT-5",
+		"POINT1PCT-6",
+		"POINT1PCT-7",
+		"POINT1PCT-8",
+		"POINT1PCT-9"
+	);
 
-	public static void main(String[] args) throws Exception {
-		ThreadFactory threadFactory = new BasicThreadFactory.Builder()
-				.namingPattern("worker-%d")
-				.daemon(true)
-				.priority(Thread.MIN_PRIORITY)
-				.build();
-		RejectedExecutionHandler rejectionHandler = new ThreadPoolProviderImpl.BlockPolicy();
-		ExecutorService executor = new ThreadPoolExecutor(10, 10, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(500), threadFactory, rejectionHandler);
+	private static class FileAndName {
+		private final String myFilename;
+		private final String myContents;
 
-		Map<String, AtomicInteger> resourceTypeToCount = Collections.synchronizedMap(new HashMap<>());
+		private FileAndName(String myFilename, String myContents) {
+			this.myFilename = myFilename;
+			this.myContents = myContents;
+		}
 
-		Collection<File> inputFiles = FileUtils.listFiles(new File("src/main/data/new_synthea_files"), new String[]{"json"}, false);
-		int fileIndex = 0;
-		List<Future<?>> futures = new ArrayList<>();
-		int totalFiles = inputFiles.size();
+		public String getFilename() {
+			return myFilename;
+		}
 
-		StopWatch sw = new StopWatch();
-		for (var next : inputFiles) {
-			int finalFileIndex = fileIndex;
+		public String getContents() {
+			return myContents;
+		}
+	}
 
-			Callable<Void> task = () -> {
-				ourLog.info("Processing file {}/{}: {} - {}/sec ETA: {}", finalFileIndex, totalFiles, next.getName(), sw.formatThroughput(finalFileIndex, TimeUnit.SECONDS), sw.getEstimatedTimeRemaining(finalFileIndex, totalFiles));
-				Bundle bundle;
-				try (Reader reader = new BufferedReader(new FileReader(next))) {
-					bundle = ourCtx.newJsonParser().parseResource(Bundle.class, reader);
+	private static class WriterThread extends Thread {
+		@Override
+		public void run() {
+			setName("writer");
+
+			StopWatch sw = new StopWatch();
+			int count = 0;
+			while (true) {
+				count++;
+				FileAndName nextFile = null;
+				try {
+					nextFile = ourOutputFilesQueue.poll(1, TimeUnit.SECONDS);
+				} catch (InterruptedException e) {
+					// ignore
 				}
+
+				if (nextFile == null) {
+					if (ourFinishedReading.get() && ourTotalFileCount.get() == ourTotalWrittenFileCount.get()) {
+						ourLog.info("Finished writing - Have written {} files", ourTotalWrittenFileCount.get());
+						return;
+					}
+					if (ourException != null) {
+						return;
+					}
+
+					continue;
+				}
+
+				if (count % 10 == 0) {
+					int total = ourTotalFileCount.get();
+					int writeQueue = ourOutputFilesQueue.size();
+					ourLog.info("Processing file {}/{}: {}/sec ETA {} - ProcessQueue[{}] WriteQueue[{}]", count, total, sw.formatThroughput(count, TimeUnit.SECONDS), sw.getEstimatedTimeRemaining(count, total), ourInputFilesQueue.size(), writeQueue);
+				}
+
+				File targetFile = new File(STAGED_SYNTHEA_FILES, nextFile.getFilename() + ".gz");
+				try (FileOutputStream fos = new FileOutputStream(targetFile, false)) {
+					try (BufferedOutputStream bos = new BufferedOutputStream(fos)) {
+						try (GZIPOutputStream gos = new GZIPOutputStream(bos)) {
+							try (OutputStreamWriter w = new OutputStreamWriter(gos, StandardCharsets.UTF_8)) {
+								w.write(nextFile.getContents());
+							}
+						}
+					}
+				} catch (Exception e) {
+					ourLog.error("Failure during write", e);
+					ourException = e;
+					return;
+				}
+
+				try {
+					File sourceFile = new File(NEW_SYNTHEA_FILES, nextFile.getFilename());
+					Validate.isTrue(sourceFile.exists());
+					sourceFile.delete();
+				} catch (Exception e) {
+					ourLog.error("Failure during write", e);
+					ourException = e;
+					return;
+				}
+
+
+			}
+		}
+	}
+
+	private static class ReaderThread extends Thread {
+
+		private final List<File> myInputFiles;
+		private final int myReaderIndex;
+
+		public ReaderThread(List<File> theInputFiles, int theReaderIndex) {
+			myInputFiles = theInputFiles;
+			myReaderIndex = theReaderIndex;
+		}
+
+		@Override
+		public void run() {
+			setName("reader-" + myReaderIndex);
+
+			int count = 0;
+			for (var nextFile : myInputFiles) {
+
+				try (FileReader reader = new FileReader(nextFile)) {
+					String contents = IOUtils.toString(reader);
+					ourInputFilesQueue.add(new FileAndName(nextFile.getName(), contents));
+				} catch (Exception e) {
+					ourLog.error("Failed during read", e);
+					ourException = e;
+					return;
+				}
+
+
+				if (count % 10 == 0) {
+					ourLog.info("Have read {} files", count);
+				}
+				count++;
+
+			}
+
+			ourLog.info("Reading is complete - Have read {} files", ourTotalFileCount.get());
+			ourFinishedReading.set(true);
+		}
+	}
+
+	private static class ProcessorThread extends Thread {
+		private static int ourThreadCount = 0;
+
+		@Override
+		public void run() {
+			setName("worker-" + ourThreadCount++);
+
+			int count = 0;
+			while (true) {
+				FileAndName nextFile = null;
+				try {
+					nextFile = ourInputFilesQueue.poll(1, TimeUnit.SECONDS);
+				} catch (InterruptedException e) {
+					// ignore
+				}
+
+				if (nextFile == null) {
+					if (ourFinishedReading.get() && ourTotalFileCount.get() == ourTotalProcessedFileCount.get()) {
+						ourLog.info("Finished processing - Have processed {} files", ourTotalProcessedFileCount.get());
+						return;
+					}
+					if (ourException != null) {
+						return;
+					}
+					continue;
+				}
+
+				Bundle bundle = ourCtx.newJsonParser().parseResource(Bundle.class, nextFile.getContents());
+				List<String> tags = getTagsForNewPatient();
 
 				List<Resource> resources = new ArrayList<>();
 				for (Iterator<Bundle.BundleEntryComponent> iter = bundle.getEntry().iterator(); iter.hasNext(); ) {
 					Bundle.BundleEntryComponent bundleEntryComponent = iter.next();
 					Resource resource = bundleEntryComponent.getResource();
 					if (resource != null) {
-						if (next.getName().startsWith("practitionerInformation") || next.getName().startsWith("hospitalInformation")) {
+						if (nextFile.getFilename().startsWith("practitionerInformation") || nextFile.getFilename().startsWith("hospitalInformation")) {
 							resources.add(resource);
 							continue;
 						}
@@ -71,12 +250,19 @@ public class Step1_FileStager {
 						switch (resourceType) {
 							case "Patient": {
 								Patient p = (Patient) resource;
+								tags.forEach(t -> p.getMeta().addProfile(t));
 								resources.add(p);
+								break;
+							}
+							case "Encounter": {
+								Encounter e = (Encounter) resource;
+								tags.forEach(t -> e.getMeta().addProfile(t));
+								resources.add(e);
 								break;
 							}
 							case "Observation": {
 								Observation o = (Observation) resource;
-								o.setEncounter(null);
+								tags.forEach(t -> o.getMeta().addProfile(t));
 								resources.add(o);
 								break;
 							}
@@ -88,38 +274,67 @@ public class Step1_FileStager {
 				}
 
 				for (var nextResource : resources) {
-					AtomicInteger count = resourceTypeToCount.computeIfAbsent(ourCtx.getResourceType(nextResource), t -> new AtomicInteger());
-					count.incrementAndGet();
+					AtomicInteger typeCount = resourceTypeToCount.computeIfAbsent(ourCtx.getResourceType(nextResource), t -> new AtomicInteger());
+					typeCount.incrementAndGet();
 				}
 
-				File targetFile = new File("src/main/data/staged_synthea_files", next.getName() + ".gz");
-				try (FileOutputStream fos = new FileOutputStream(targetFile, false)) {
-					try (BufferedOutputStream bos = new BufferedOutputStream(fos)) {
-						try (GZIPOutputStream gos = new GZIPOutputStream(bos)) {
-							try (OutputStreamWriter w = new OutputStreamWriter(gos, StandardCharsets.UTF_8)) {
-								ourCtx.newJsonParser().encodeResourceToWriter(bundle, w);
-							}
-						}
-					}
+				String newBundle = ourCtx.newJsonParser().encodeResourceToString(bundle);
+				ourOutputFilesQueue.add(new FileAndName(nextFile.getFilename(), newBundle));
+				ourTotalProcessedFileCount.incrementAndGet();
+
+				count++;
+				if (count % 10 == 0) {
+					ourLog.info("Have processed {} files", count);
 				}
-
-				next.delete();
-
-				return null;
-			};
-
-			futures.add(executor.submit(task));
-
-			fileIndex++;
-
+			}
 		}
 
-		for (var next : futures) {
-			next.get();
+		private List<String> getTagsForNewPatient() {
+			var retVal = new ArrayList<String>();
+			for (String next : TAG_20PCT) {
+				if (shouldApply(0.2)) {
+					retVal.add(next);
+				}
+			}
+			for (String next : TAG_1PCT) {
+				if (shouldApply(0.01)) {
+					retVal.add(next);
+				}
+			}
+			for (String next : TAG_POINT1PCT) {
+				if (shouldApply(0.001)) {
+					retVal.add(next);
+				}
+			}
+			return retVal;
+		}
+
+		private boolean shouldApply(double theThreshold) {
+			return (Math.random() < theThreshold);
+		}
+	}
+
+	public static void main(String[] args) throws Exception {
+		ourLog.info("Listing files in {}", NEW_SYNTHEA_FILES);
+		List<File> inputFiles = new ArrayList<>(FileUtils.listFiles(NEW_SYNTHEA_FILES, new String[]{"json"}, false));
+		ourTotalFileCount.set(inputFiles.size());
+
+		int readerPartitions = 2;
+		int idx = 0;
+		for (var nextPartition : Lists.partition(inputFiles, readerPartitions)) {
+			new ReaderThread(nextPartition, idx++).start();
+		}
+
+		for (int i = 0; i < 10; i++) {
+			new ProcessorThread().start();
+		}
+
+		new WriterThread().start();
+
+		while (ourException == null && !ourFinishedWriting.get()) {
+			Thread.sleep(1000);
 		}
 
 		resourceTypeToCount.keySet().stream().sorted().forEach(t -> ourLog.info("Count {} -> {}", t, resourceTypeToCount.get(t).get()));
-
-		executor.shutdown();
 	}
 }

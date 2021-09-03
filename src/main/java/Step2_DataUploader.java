@@ -2,6 +2,7 @@ import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
 import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
 import org.apache.commons.io.FileUtils;
 import org.hl7.fhir.r4.model.Bundle;
 import org.jetbrains.annotations.NotNull;
@@ -33,7 +34,7 @@ public class Step2_DataUploader {
                         .collect(Collectors.toList());
 
         int fileIndex = 0;
-        List<Future<?>> futures = new ArrayList<>();
+        Queue<Future<?>> futures = new ArrayBlockingQueue<>(10000);
 
         ourCtx.getRestfulClientFactory().setSocketTimeout(10000000);
         IGenericClient client = ourCtx.newRestfulGenericClient("http://localhost:8000");
@@ -59,11 +60,27 @@ public class Step2_DataUploader {
             }
 
             Callable<Void> task = () -> {
-                client.transaction().withBundle(inputBundle).execute();
-                return null;
+                for (int i = 0; ; i++) {
+                    try {
+                        client.transaction().withBundle(inputBundle).execute();
+                        return null;
+                    } catch (Exception e) {
+                        String msg = "Failure during upload of file at index " + finalFileIndex + ": " + e.toString();
+                        if (i < 10) {
+                            ourLog.warn(msg);
+                            continue;
+                        }
+                        ourLog.error(msg);
+                        throw new InternalErrorException(msg, e);
+                    }
+                }
             };
 
             futures.add(executor.submit(task));
+
+            while (futures.size() > 1000) {
+                futures.poll().get();
+            }
 
             fileIndex++;
 
