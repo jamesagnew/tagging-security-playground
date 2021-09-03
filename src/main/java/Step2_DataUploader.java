@@ -2,8 +2,10 @@ import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
 import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
 import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
 import org.apache.commons.io.FileUtils;
+import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
 import org.hl7.fhir.r4.model.Bundle;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
@@ -55,7 +57,16 @@ public class Step2_DataUploader {
             }
 
             if (isMetaFile(next)) {
-                client.transaction().withBundle(inputBundle).execute();
+                try {
+                    inputBundle.setType(Bundle.BundleType.TRANSACTION);
+                    client.transaction().withBundle(inputBundle).execute();
+                } catch (BaseServerResponseException e) {
+                    IBaseOperationOutcome operationOutcome = e.getOperationOutcome();
+                    if (operationOutcome != null) {
+                        ourLog.error("Failure response: {}", ourCtx.newJsonParser().setPrettyPrint(true).encodeResourceToString(operationOutcome));
+                    }
+                    throw e;
+                }
                 continue;
             }
 

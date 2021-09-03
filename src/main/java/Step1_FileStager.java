@@ -104,14 +104,13 @@ public class Step1_FileStager {
 	}
 
 	private static class WriterThread extends Thread {
+
 		@Override
 		public void run() {
 			setName("writer");
 
 			StopWatch sw = new StopWatch();
-			int count = 0;
 			while (true) {
-				count++;
 				FileAndName nextFile = null;
 				try {
 					nextFile = ourOutputFilesQueue.poll(1, TimeUnit.SECONDS);
@@ -122,6 +121,7 @@ public class Step1_FileStager {
 				if (nextFile == null) {
 					if (ourFinishedReading.get() && ourTotalFileCount.get() == ourTotalWrittenFileCount.get()) {
 						ourLog.info("Finished writing - Have written {} files", ourTotalWrittenFileCount.get());
+						ourFinishedWriting.set(true);
 						return;
 					}
 					if (ourException != null) {
@@ -131,6 +131,7 @@ public class Step1_FileStager {
 					continue;
 				}
 
+				int count = ourTotalWrittenFileCount.get();
 				if (count % 10 == 0) {
 					int total = ourTotalFileCount.get();
 					int writeQueue = ourOutputFilesQueue.size();
@@ -162,7 +163,7 @@ public class Step1_FileStager {
 					return;
 				}
 
-
+				ourTotalWrittenFileCount.incrementAndGet();
 			}
 		}
 	}
@@ -186,7 +187,7 @@ public class Step1_FileStager {
 
 				try (FileReader reader = new FileReader(nextFile)) {
 					String contents = IOUtils.toString(reader);
-					ourInputFilesQueue.add(new FileAndName(nextFile.getName(), contents));
+					ourInputFilesQueue.put(new FileAndName(nextFile.getName(), contents));
 				} catch (Exception e) {
 					ourLog.error("Failed during read", e);
 					ourException = e;
@@ -319,9 +320,15 @@ public class Step1_FileStager {
 		List<File> inputFiles = new ArrayList<>(FileUtils.listFiles(NEW_SYNTHEA_FILES, new String[]{"json"}, false));
 		ourTotalFileCount.set(inputFiles.size());
 
+		if (inputFiles.size() == 0){
+			ourLog.info("No input files");
+			return;
+		}
+
 		int readerPartitions = 2;
 		int idx = 0;
-		for (var nextPartition : Lists.partition(inputFiles, readerPartitions)) {
+		List<List<File>> partitions = Lists.partition(inputFiles, inputFiles.size() / readerPartitions);
+		for (var nextPartition : partitions) {
 			new ReaderThread(nextPartition, idx++).start();
 		}
 
