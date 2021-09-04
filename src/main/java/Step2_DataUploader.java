@@ -16,10 +16,10 @@ import java.io.FileInputStream;
 import java.io.InputStreamReader;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 
+@SuppressWarnings("BusyWait")
 public class Step2_DataUploader {
     private static final Logger ourLog = LoggerFactory.getLogger(Step2_DataUploader.class);
 
@@ -39,8 +39,8 @@ public class Step2_DataUploader {
         Queue<Future<?>> futures = new ArrayBlockingQueue<>(10000);
 
         ourCtx.getRestfulClientFactory().setSocketTimeout(10000000);
-        IGenericClient client = ourCtx.newRestfulGenericClient("http://localhost:8000");
-        client.registerInterceptor(new BasicAuthInterceptor("admin:password"));
+        IGenericClient client = ourCtx.newRestfulGenericClient(PlaygroundConstants.FHIR_ENDPOINT_BASE_URL);
+        client.registerInterceptor(new BasicAuthInterceptor(PlaygroundConstants.FHIR_ENDPOINT_CREDENTIALS));
         client.registerInterceptor(new LoggingInterceptor(false));
 
         for (var next : inputFiles) {
@@ -71,14 +71,19 @@ public class Step2_DataUploader {
             }
 
             Callable<Void> task = () -> {
-                for (int i = 0; ; i++) {
+                for (int i = 1; ; i++) {
                     try {
                         client.transaction().withBundle(inputBundle).execute();
                         return null;
                     } catch (Exception e) {
-                        String msg = "Failure during upload of file at index " + finalFileIndex + ": " + e.toString();
-                        if (i < 10) {
+                        String msg = "Failure " + i + " during upload of file at index " + finalFileIndex + ": " + e.toString();
+                        if (i <= 10) {
                             ourLog.warn(msg);
+                            try {
+                                Thread.sleep((long) (1000.0 * Math.random()));
+                            } catch (Exception e2) {
+                                // ignore
+                            }
                             continue;
                         }
                         ourLog.error(msg);

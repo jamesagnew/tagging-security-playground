@@ -19,7 +19,6 @@ import java.io.FileReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -48,42 +47,6 @@ public class Step1_FileStager {
 	private static final AtomicInteger ourTotalProcessedFileCount = new AtomicInteger(0);
 	private static final AtomicInteger ourTotalWrittenFileCount = new AtomicInteger(0);
 	private static Exception ourException;
-	private static List<String> TAG_20PCT = Lists.newArrayList(
-		"20PCT-0",
-		"20PCT-1",
-		"20PCT-2",
-		"20PCT-3",
-		"20PCT-4",
-		"20PCT-5",
-		"20PCT-6",
-		"20PCT-7",
-		"20PCT-8",
-		"20PCT-9"
-	);
-	private static List<String> TAG_1PCT = Lists.newArrayList(
-		"1PCT-0",
-		"1PCT-1",
-		"1PCT-2",
-		"1PCT-3",
-		"1PCT-4",
-		"1PCT-5",
-		"1PCT-6",
-		"1PCT-7",
-		"1PCT-8",
-		"1PCT-9"
-	);
-	private static List<String> TAG_POINT1PCT = Lists.newArrayList(
-		"POINT1PCT-0",
-		"POINT1PCT-1",
-		"POINT1PCT-2",
-		"POINT1PCT-3",
-		"POINT1PCT-4",
-		"POINT1PCT-5",
-		"POINT1PCT-6",
-		"POINT1PCT-7",
-		"POINT1PCT-8",
-		"POINT1PCT-9"
-	);
 
 	private static class FileAndName {
 		private final String myFilename;
@@ -156,7 +119,7 @@ public class Step1_FileStager {
 				try {
 					File sourceFile = new File(NEW_SYNTHEA_FILES, nextFile.getFilename());
 					Validate.isTrue(sourceFile.exists());
-					sourceFile.delete();
+					Validate.isTrue(sourceFile.delete());
 				} catch (Exception e) {
 					ourLog.error("Failure during write", e);
 					ourException = e;
@@ -249,26 +212,25 @@ public class Step1_FileStager {
 
 						var resourceType = ourCtx.getResourceType(resource);
 						switch (resourceType) {
-							case "Patient": {
+							case "Patient" -> {
 								Patient p = (Patient) resource;
+								p.getMeta().getProfile().clear();
 								tags.forEach(t -> p.getMeta().addProfile(t));
 								resources.add(p);
-								break;
 							}
-							case "Encounter": {
+							case "Encounter" -> {
 								Encounter e = (Encounter) resource;
+								e.getMeta().getProfile().clear();
 								tags.forEach(t -> e.getMeta().addProfile(t));
 								resources.add(e);
-								break;
 							}
-							case "Observation": {
+							case "Observation" -> {
 								Observation o = (Observation) resource;
+								o.getMeta().getProfile().clear();
 								tags.forEach(t -> o.getMeta().addProfile(t));
 								resources.add(o);
-								break;
 							}
-							default:
-								iter.remove();
+							default -> iter.remove();
 						}
 
 					}
@@ -292,17 +254,17 @@ public class Step1_FileStager {
 
 		private List<String> getTagsForNewPatient() {
 			var retVal = new ArrayList<String>();
-			for (String next : TAG_20PCT) {
+			for (String next : PlaygroundConstants.TAG_20PCT) {
 				if (shouldApply(0.2)) {
 					retVal.add(next);
 				}
 			}
-			for (String next : TAG_1PCT) {
+			for (String next : PlaygroundConstants.TAG_1PCT) {
 				if (shouldApply(0.01)) {
 					retVal.add(next);
 				}
 			}
-			for (String next : TAG_POINT1PCT) {
+			for (String next : PlaygroundConstants.TAG_POINT1PCT) {
 				if (shouldApply(0.001)) {
 					retVal.add(next);
 				}
