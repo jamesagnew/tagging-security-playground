@@ -1,4 +1,5 @@
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
 import ca.uhn.fhir.util.StopWatch;
 import com.google.common.collect.Lists;
 import org.apache.commons.io.FileUtils;
@@ -68,9 +69,11 @@ public class Step1_FileStager {
 
 	private static class WriterThread extends Thread {
 
+		private static int ourWriterIndex = 0;
+
 		@Override
 		public void run() {
-			setName("writer");
+			setName("writer-" + ourWriterIndex++);
 
 			StopWatch sw = new StopWatch();
 			while (true) {
@@ -81,7 +84,7 @@ public class Step1_FileStager {
 					// ignore
 				}
 
-				if (nextFile == null) {
+				if (nextFile == null || ourFinishedWriting.get()) {
 					if (ourFinishedReading.get() && ourTotalFileCount.get() == ourTotalWrittenFileCount.get()) {
 						ourLog.info("Finished writing - Have written {} files", ourTotalWrittenFileCount.get());
 						ourFinishedWriting.set(true);
@@ -242,7 +245,11 @@ public class Step1_FileStager {
 				}
 
 				String newBundle = ourCtx.newJsonParser().encodeResourceToString(bundle);
-				ourOutputFilesQueue.add(new FileAndName(nextFile.getFilename(), newBundle));
+				try {
+					ourOutputFilesQueue.put(new FileAndName(nextFile.getFilename(), newBundle));
+				} catch (InterruptedException e) {
+					throw new InternalErrorException(e);
+				}
 				ourTotalProcessedFileCount.incrementAndGet();
 
 				count++;
@@ -287,7 +294,7 @@ public class Step1_FileStager {
 			return;
 		}
 
-		int readerPartitions = 2;
+		int readerPartitions = 4;
 		int idx = 0;
 		List<List<File>> partitions = Lists.partition(inputFiles, inputFiles.size() / readerPartitions);
 		for (var nextPartition : partitions) {
@@ -298,7 +305,9 @@ public class Step1_FileStager {
 			new ProcessorThread().start();
 		}
 
-		new WriterThread().start();
+		for (int i = 0; i < 2; i++) {
+			new WriterThread().start();
+		}
 
 		while (ourException == null && !ourFinishedWriting.get()) {
 			Thread.sleep(1000);
