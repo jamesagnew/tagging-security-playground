@@ -1,6 +1,9 @@
 import com.google.common.collect.Lists;
 
+import java.util.Collection;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class PlaygroundConstants {
 
@@ -42,4 +45,14 @@ public class PlaygroundConstants {
 		"POINT1PCT-8",
 		"POINT1PCT-9"
 	);
+	public static List<String> ALL_TAGS = Stream
+		.of(TAG_20PCT, TAG_1PCT, TAG_POINT1PCT)
+		.flatMap(Collection::stream)
+		.collect(Collectors.toList());
+
+	public static String randomTag() {
+		int idx = (int)(((double)ALL_TAGS.size()) * Math.random());
+		return ALL_TAGS.get(idx);
+	}
+
 }

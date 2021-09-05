@@ -43,4 +43,9 @@ cd ../tagging-security-playground
 mvn clean compile exec:java -Dexec.mainClass=Step1_FileStager
 ```
 
+* Monitor Progress - Run this from the parent directory
+
+```
+echo -n "New: "; find src/main/data/new_synthea_files | wc -l; echo -n "Staged: "; find src/main/data/staged_synthea_files | wc -l; du -h src/main/data/new_synthea_files src/main/data/staged_synthea_files 2>/dev/null
+```
 
