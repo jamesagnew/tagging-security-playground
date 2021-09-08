@@ -8,7 +8,9 @@ import org.apache.commons.lang3.Validate;
 import org.hl7.fhir.r4.model.Bundle;
 import org.hl7.fhir.r4.model.Encounter;
 import org.hl7.fhir.r4.model.Observation;
+import org.hl7.fhir.r4.model.Organization;
 import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Practitioner;
 import org.hl7.fhir.r4.model.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,7 +49,11 @@ public class Step1_FileStager {
 	private static final AtomicInteger ourTotalFileCount = new AtomicInteger(0);
 	private static final AtomicInteger ourTotalProcessedFileCount = new AtomicInteger(0);
 	private static final AtomicInteger ourTotalWrittenFileCount = new AtomicInteger(0);
+	public static final String PATIENT_FILES_NDJSON_GZ = "patient-files.ndjson.gz";
+	public static final String META_FILES_NDJSON_GZ = "meta-files.ndjson.gz";
 	private static Exception ourException;
+	private static OutputStreamWriter ourPatientFileWriter;
+	private static OutputStreamWriter ourMetaFileWriter;
 
 	private static class FileAndName {
 		private final String myFilename;
@@ -104,13 +110,16 @@ public class Step1_FileStager {
 					ourLog.info("Processing file {}/{}: {}/sec ETA {} - ProcessQueue[{}] WriteQueue[{}]", count, total, sw.formatThroughput(count, TimeUnit.SECONDS), sw.getEstimatedTimeRemaining(count, total), ourInputFilesQueue.size(), writeQueue);
 				}
 
-				File targetFile = new File(STAGED_SYNTHEA_FILES, nextFile.getFilename() + ".gz");
-				try (FileOutputStream fos = new FileOutputStream(targetFile, false)) {
-					try (BufferedOutputStream bos = new BufferedOutputStream(fos)) {
-						try (GZIPOutputStream gos = new GZIPOutputStream(bos)) {
-							try (OutputStreamWriter w = new OutputStreamWriter(gos, StandardCharsets.UTF_8)) {
-								w.write(nextFile.getContents());
-							}
+				try {
+					if (Step2_DataUploader.isMetaFile(nextFile.getFilename())) {
+						synchronized(ourMetaFileWriter) {
+							ourMetaFileWriter.write(nextFile.getContents());
+							ourMetaFileWriter.write("\n");
+						}
+					} else {
+						synchronized(ourPatientFileWriter) {
+							ourPatientFileWriter.write(nextFile.getContents());
+							ourPatientFileWriter.write("\n");
 						}
 					}
 				} catch (Exception e) {
@@ -208,13 +217,19 @@ public class Step1_FileStager {
 					Bundle.BundleEntryComponent bundleEntryComponent = iter.next();
 					Resource resource = bundleEntryComponent.getResource();
 					if (resource != null) {
-						if (nextFile.getFilename().startsWith("practitionerInformation") || nextFile.getFilename().startsWith("hospitalInformation")) {
-							resources.add(resource);
-							continue;
-						}
-
 						var resourceType = ourCtx.getResourceType(resource);
+
 						switch (resourceType) {
+							case "Practitioner" -> {
+								Practitioner p = (Practitioner) resource;
+								p.getMeta().getProfile().clear();
+								resources.add(p);
+							}
+							case "Organization" -> {
+								Organization p = (Organization) resource;
+								p.getMeta().getProfile().clear();
+								resources.add(p);
+							}
 							case "Patient" -> {
 								Patient p = (Patient) resource;
 								p.getMeta().getProfile().clear();
@@ -305,13 +320,40 @@ public class Step1_FileStager {
 			new ProcessorThread().start();
 		}
 
-		for (int i = 0; i < 2; i++) {
-			new WriterThread().start();
+
+		File patientFile = new File(STAGED_SYNTHEA_FILES, PATIENT_FILES_NDJSON_GZ);
+		try (FileOutputStream patientFileFileOutputStream = new FileOutputStream(patientFile, true)) {
+			try (BufferedOutputStream patientFileBufferedStream = new BufferedOutputStream(patientFileFileOutputStream)) {
+				try (GZIPOutputStream patientFileGzipStream = new GZIPOutputStream(patientFileBufferedStream)) {
+					try (OutputStreamWriter patientFileWriter = new OutputStreamWriter(patientFileGzipStream, StandardCharsets.UTF_8)) {
+						ourPatientFileWriter = patientFileWriter;
+
+						File targetFile = new File(STAGED_SYNTHEA_FILES, META_FILES_NDJSON_GZ);
+						try (FileOutputStream metaFileFileOutputStream = new FileOutputStream(targetFile, true)) {
+							try (BufferedOutputStream metaFileBufferedStream = new BufferedOutputStream(metaFileFileOutputStream)) {
+								try (GZIPOutputStream metaFileGzipStream = new GZIPOutputStream(metaFileBufferedStream)) {
+									try (OutputStreamWriter metaFileWriter = new OutputStreamWriter(metaFileGzipStream, StandardCharsets.UTF_8)) {
+										ourMetaFileWriter = metaFileWriter;
+
+										for (int i = 0; i < 2; i++) {
+											new WriterThread().start();
+										}
+
+										while (ourException == null && !ourFinishedWriting.get()) {
+											Thread.sleep(1000);
+										}
+
+									}
+								}
+							}
+						}
+
+
+					}
+				}
+			}
 		}
 
-		while (ourException == null && !ourFinishedWriting.get()) {
-			Thread.sleep(1000);
-		}
 
 		resourceTypeToCount.keySet().stream().sorted().forEach(t -> ourLog.info("Count {} -> {}", t, resourceTypeToCount.get(t).get()));
 	}

@@ -1,127 +1,221 @@
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.jpa.search.reindex.ResourceReindexingSvcImpl;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
-import ca.uhn.fhir.rest.client.interceptor.LoggingInterceptor;
 import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
 import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.util.StopWatch;
+import com.google.common.collect.Lists;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.input.CountingInputStream;
+import org.apache.commons.lang3.Validate;
 import org.hl7.fhir.instance.model.api.IBaseOperationOutcome;
 import org.hl7.fhir.r4.model.Bundle;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.io.InputStreamReader;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.stream.Collectors;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Queue;
+import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPInputStream;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 @SuppressWarnings("BusyWait")
 public class Step2_DataUploader {
-    private static final Logger ourLog = LoggerFactory.getLogger(Step2_DataUploader.class);
+	private static final Logger ourLog = LoggerFactory.getLogger(Step2_DataUploader.class);
 
-    private static final FhirContext ourCtx = FhirContext.forR4Cached();
+	private static final FhirContext ourCtx = FhirContext.forR4Cached();
+	private static final AtomicInteger ourUploadedCount = new AtomicInteger(0);
+	private static final AtomicInteger ourActiveUploadsCount = new AtomicInteger(0);
+	private static LinkedBlockingQueue<Runnable> ourWorkQueue;
 
-    public static void main(String[] args) throws Exception {
-        ExecutorService executor = new ThreadPoolExecutor(10, 10, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(500));
+	private static class UploadTask implements Callable<Void> {
+		private final IGenericClient myClient;
+		private final Bundle myInputBundle;
+		private final int myBytesRead;
+		private final long myTotalBytes;
+		private final StopWatch mySw;
+		private final int myFinalFileIndex;
+		private final Queue<Future<?>> myFutures;
+		private final ExecutorService myExecutor;
+		private int myRetryCount = 0;
 
-        Collection<File> inputFiles =
-                FileUtils
-                        .listFiles(new File("src/main/data/staged_synthea_files"), new String[]{"gz"}, false)
-                        .stream()
-                        .sorted(new SyntheaMetaFilesFirstComparator())
-                        .collect(Collectors.toList());
+		public UploadTask(IGenericClient theClient, Bundle theInputBundle, int theBytesRead, long theTotalBytes, StopWatch theSw, int theFinalFileIndex, Queue<Future<?>> theFutures, ExecutorService theExecutor) {
+			myClient = theClient;
+			myInputBundle = theInputBundle;
+			myBytesRead = theBytesRead;
+			myTotalBytes = theTotalBytes;
+			mySw = theSw;
+			myFinalFileIndex = theFinalFileIndex;
+			myFutures = theFutures;
+			myExecutor = theExecutor;
+		}
 
-        int fileIndex = 0;
-        Queue<Future<?>> futures = new ArrayBlockingQueue<>(10000);
+		@Override
+		public Void call() throws Exception {
+			try {
 
-        ourCtx.getRestfulClientFactory().setSocketTimeout(10000000);
-        IGenericClient client = ourCtx.newRestfulGenericClient(PlaygroundConstants.FHIR_ENDPOINT_BASE_URL);
-        client.registerInterceptor(new BasicAuthInterceptor(PlaygroundConstants.FHIR_ENDPOINT_CREDENTIALS));
-        client.registerInterceptor(new LoggingInterceptor(false));
+				int active = 0;
+				try {
+					active = ourActiveUploadsCount.incrementAndGet();
+					myClient.transaction().withBundle(myInputBundle).execute();
+				} finally {
+					ourActiveUploadsCount.decrementAndGet();
+				}
 
-        for (var next : inputFiles) {
-            int finalFileIndex = fileIndex;
+				int uploaded = ourUploadedCount.incrementAndGet();
+				if (uploaded % 10 == 0) {
+					ourLog.info("Uploaded {} - Have read {} of {} - {}/sec - {} active - ETA: {}", uploaded, FileUtils.byteCountToDisplaySize(myBytesRead), FileUtils.byteCountToDisplaySize(myTotalBytes), mySw.formatThroughput(uploaded, TimeUnit.SECONDS), active, mySw.getEstimatedTimeRemaining(myBytesRead, myTotalBytes));
+				}
+				return null;
+			} catch (Exception e) {
+				myRetryCount++;
+				String msg = "Failure " + myRetryCount + " during upload of file at index " + myFinalFileIndex + ": " + e;
+				if (myRetryCount <= 10) {
+					msg += " - Resubmitting";
+					ourLog.warn(msg);
+					myFutures.add(myExecutor.submit(this));
+					return null;
+				}
 
-            ourLog.info("Processing file {}: {}", finalFileIndex, next.getName());
-            Bundle inputBundle;
-            try (FileInputStream fis = new FileInputStream(next)) {
-                try (GZIPInputStream gis = new GZIPInputStream(fis)) {
-                    try (InputStreamReader reader = new InputStreamReader(gis)) {
-                        inputBundle = ourCtx.newJsonParser().parseResource(Bundle.class, reader);
-                    }
-                }
-            }
+				// FIXME: remove
+				File tmpFile = File.createTempFile("failed-upload", ".json");
+				try (FileWriter w = new FileWriter(tmpFile, StandardCharsets.UTF_8, false)) {
+					ourCtx.newJsonParser().encodeResourceToWriter(myInputBundle, w);
+				}
+				msg += " - Failing input saved to " + tmpFile;
+				ourLog.error(msg);
+				return null;
+			}
+		}
 
-            if (isMetaFile(next)) {
-                try {
-                    inputBundle.setType(Bundle.BundleType.TRANSACTION);
-                    client.transaction().withBundle(inputBundle).execute();
-                } catch (BaseServerResponseException e) {
-                    IBaseOperationOutcome operationOutcome = e.getOperationOutcome();
-                    if (operationOutcome != null) {
-                        ourLog.error("Failure response: {}", ourCtx.newJsonParser().setPrettyPrint(true).encodeResourceToString(operationOutcome));
-                    }
-                    throw e;
-                }
-                continue;
-            }
+	}
 
-            Callable<Void> task = () -> {
-                for (int i = 1; ; i++) {
-                    try {
-                        client.transaction().withBundle(inputBundle).execute();
-                        return null;
-                    } catch (Exception e) {
-                        String msg = "Failure " + i + " during upload of file at index " + finalFileIndex + ": " + e.toString();
-                        if (i <= 10) {
-                            ourLog.warn(msg);
-                            try {
-                                Thread.sleep((long) (1000.0 * Math.random()));
-                            } catch (Exception e2) {
-                                // ignore
-                            }
-                            continue;
-                        }
-                        ourLog.error(msg);
-                        throw new InternalErrorException(msg, e);
-                    }
-                }
-            };
+	public static void main(String[] args) throws Exception {
+		ourWorkQueue = new LinkedBlockingQueue<>(5000);
+		ExecutorService executor = new ThreadPoolExecutor(10, 10, 0L, TimeUnit.MILLISECONDS, ourWorkQueue, new ResourceReindexingSvcImpl.BlockPolicy());
 
-            futures.add(executor.submit(task));
+		ourCtx.getRestfulClientFactory().setSocketTimeout(10000000);
+		IGenericClient client = ourCtx.newRestfulGenericClient(PlaygroundConstants.FHIR_ENDPOINT_BASE_URL);
+		client.registerInterceptor(new BasicAuthInterceptor(PlaygroundConstants.FHIR_ENDPOINT_CREDENTIALS));
+//		client.registerInterceptor(new LoggingInterceptor(false));
 
-            while (futures.size() > 1000) {
-                futures.poll().get();
-            }
+//		uploadFile(Step1_FileStager.META_FILES_NDJSON_GZ, executor, client);
+		uploadFile(Step1_FileStager.PATIENT_FILES_NDJSON_GZ, executor, client);
 
-            fileIndex++;
+		executor.shutdown();
+	}
 
-        }
+	private static void uploadFile(String theFilename, ExecutorService executor, IGenericClient client) throws IOException, ExecutionException, InterruptedException {
+		File inputFile = new File("src/main/data/staged_synthea_files/" + theFilename);
+		long totalBytes = FileUtils.sizeOf(inputFile);
+		Validate.isTrue(inputFile.exists());
 
-        for (var next : futures) {
-            next.get();
-        }
+		ourLog.info("Scanning file for line count: {}", theFilename);
 
-        executor.shutdown();
-    }
+		ourLog.info("Beginning upload for file: {}", theFilename);
 
-    private static class SyntheaMetaFilesFirstComparator implements Comparator<File> {
-        @Override
-        public int compare(@NotNull File theFile1, @NotNull File theFile2) {
-            boolean f1comesFirst = isMetaFile(theFile1);
-            boolean f2comesFirst = isMetaFile(theFile2);
-            if (f1comesFirst == f2comesFirst) {
-                return 0;
-            }
-            return f1comesFirst ? -1 : 1;
-        }
-    }
+		StopWatch sw = new StopWatch();
+		try (FileInputStream fis = new FileInputStream(inputFile)) {
+			try (CountingInputStream countingInputStream = new CountingInputStream(fis)) {
+				try (GZIPInputStream gis = new GZIPInputStream(countingInputStream)) {
+					try (InputStreamReader inputStreamReader = new InputStreamReader(gis)) {
+						try (BufferedReader bufferedReader = new BufferedReader(inputStreamReader)) {
+							int fileIndex = 0;
+							Queue<Future<?>> futures = new ArrayBlockingQueue<>(10000);
 
-    private static boolean isMetaFile(@NotNull File theFile) {
-        return theFile.getName().startsWith("practitionerInformation") || theFile.getName().startsWith("hospitalInformation");
-    }
+							while (true) {
+
+								while (ourWorkQueue.size() > 500) {
+									ourLog.debug("Work queue has {} entries - Waiting for space", ourWorkQueue.size());
+									Thread.sleep(1000);
+								}
+
+								String nextLine = bufferedReader.readLine();
+								if (nextLine == null) {
+									ourLog.info("No more lines to read, waiting for queued uploads to finish");
+									for (var next : futures) {
+										next.get();
+									}
+									break;
+								}
+								if (isNotBlank(nextLine)) {
+									int finalFileIndex = fileIndex;
+									int bytesRead = countingInputStream.getCount();
+
+									if (finalFileIndex % 10 == 0) {
+										ourLog.debug("Reading resource {} ({}) - Reading {}/sec", finalFileIndex, theFilename, sw.formatThroughput(finalFileIndex, TimeUnit.SECONDS));
+									}
+
+									Bundle inputBundle = ourCtx.newJsonParser().parseResource(Bundle.class, nextLine);
+
+									if (theFilename.equals(Step1_FileStager.META_FILES_NDJSON_GZ)) {
+										try {
+											List<List<Bundle.BundleEntryComponent>> entryPartitions = Lists.partition(inputBundle.getEntry(), 100);
+											TreeMap<String, AtomicInteger> responseToCount = new TreeMap<>();
+											for (int i = 0; i < entryPartitions.size(); i++) {
+												Bundle partitionBundle = new Bundle();
+												partitionBundle.setType(Bundle.BundleType.TRANSACTION);
+												partitionBundle.setEntry(entryPartitions.get(i));
+												ourLog.info("Uploading meta file {} partition {}/{} with {} entries: {}", finalFileIndex, i, entryPartitions.size(), partitionBundle.getEntry().size(), theFilename);
+												Bundle outcome = client.transaction().withBundle(partitionBundle).execute();
+												outcome
+													.getEntry()
+													.stream()
+													.map(t -> t.getResponse().getStatus())
+													.forEach(t -> responseToCount.computeIfAbsent(t, o -> new AtomicInteger(0)).incrementAndGet());
+
+											}
+											ourLog.info("Meta upload outcomes: {}", responseToCount);
+											ourUploadedCount.incrementAndGet();
+										} catch (BaseServerResponseException e) {
+											IBaseOperationOutcome operationOutcome = e.getOperationOutcome();
+											if (operationOutcome != null) {
+												ourLog.error("Failure response: {}", ourCtx.newJsonParser().setPrettyPrint(true).encodeResourceToString(operationOutcome));
+											}
+											throw e;
+										}
+										continue;
+									}
+
+									Callable<Void> task = new UploadTask(client, inputBundle, bytesRead, totalBytes, sw, finalFileIndex, futures, executor);
+									futures.add(executor.submit(task));
+
+									while (futures.size() > 1000) {
+										futures.poll().get();
+									}
+
+									fileIndex++;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+	}
+
+	public static boolean isMetaFile(@NotNull String theFile) {
+		return theFile.startsWith("practitionerInformation") || theFile.startsWith("hospitalInformation");
+	}
+
 }

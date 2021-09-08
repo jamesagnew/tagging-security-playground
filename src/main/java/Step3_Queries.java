@@ -2,7 +2,9 @@ import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
+import ca.uhn.fhir.rest.gclient.QuantityClientParam;
 import ca.uhn.fhir.rest.gclient.StringClientParam;
+import ca.uhn.fhir.rest.gclient.TokenClientParam;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.SlidingWindowReservoir;
@@ -32,10 +34,16 @@ public class Step3_Queries {
 
 	abstract static class BaseTest {
 
-		private final Histogram myHistogram;
-
+		private final Histogram myElapsedMillisHistogram;
+		private final Histogram myResultsHistogram;
+		protected int myExecuteCount = 0;
 		BaseTest() {
-			myHistogram = ourMetricRegistry.histogram(getName(), () -> new Histogram(new SlidingWindowReservoir(100)));
+			myElapsedMillisHistogram = ourMetricRegistry.histogram(getName() + "-elapsed", () -> new Histogram(new SlidingWindowReservoir(100)));
+			myResultsHistogram = ourMetricRegistry.histogram(getName() + "-results", () -> new Histogram(new SlidingWindowReservoir(100)));
+		}
+
+		public Histogram getResultsHistogram() {
+			return myResultsHistogram;
 		}
 
 		abstract String getName();
@@ -43,17 +51,41 @@ public class Step3_Queries {
 		void run() {
 			for (int i = 0; i < 10; i++) {
 				long startTime = System.nanoTime();
-				doExecuteQuery();
+				Bundle outcome = doExecuteQuery();
 				long elapsedNanos = System.nanoTime() - startTime;
 				long elapsedMillis = elapsedNanos / 1000000;
-				myHistogram.update(elapsedMillis);
+				myElapsedMillisHistogram.update(elapsedMillis);
+				myResultsHistogram.update(outcome.getEntry().size());
+				myExecuteCount++;
+
 			}
 		}
 
-		protected abstract void doExecuteQuery();
+		protected abstract Bundle doExecuteQuery();
 
-		public Histogram getHistogram() {
-			return myHistogram;
+		public Histogram getElapsedMillisHistogram() {
+			return myElapsedMillisHistogram;
+		}
+	}
+
+	static class FindAllPatientsWithSpecificNameTest extends BaseTest {
+
+		@Override
+		String getName() {
+			return "PTS_WITH_NAME";
+		}
+
+		@Override
+		protected Bundle doExecuteQuery() {
+			int nameIndex = (int) ((double) ourNamePairs.size() * Math.random());
+			Pair<String, String> namePair = ourNamePairs.get(nameIndex);
+			return ourClient
+				.search()
+				.forResource("Patient")
+				.where(new StringClientParam("given").contains().value(namePair.getLeft()))
+				.and(new StringClientParam("family").contains().value(namePair.getRight()))
+				.returnBundle(Bundle.class)
+				.execute();
 		}
 	}
 
@@ -61,19 +93,39 @@ public class Step3_Queries {
 
 		@Override
 		String getName() {
-			return "FINDALLPTS";
+			return "PTS_WITH_TAG";
 		}
 
 		@Override
-		protected void doExecuteQuery() {
+		protected Bundle doExecuteQuery() {
 			String tag = PlaygroundConstants.randomTag();
-			Bundle outcome = ourClient
+			return ourClient
 				.search()
 				.forResource("Patient")
 				.where(new StringClientParam("_profile").contains().value(tag))
 				.returnBundle(Bundle.class)
 				.execute();
-			ourLog.debug("{} returned {} results", getName(), outcome.getEntry().size());
+		}
+	}
+
+	static class FindObservationsAboveThreasholdWithTagTest extends BaseTest {
+
+		@Override
+		String getName() {
+			return "OBS_ABOVE_THRSHOLD_WITH_TAG";
+		}
+
+		@Override
+		protected Bundle doExecuteQuery() {
+			String tag = PlaygroundConstants.randomTag();
+			return ourClient
+				.search()
+				.forResource("Observation")
+				.where(new TokenClientParam("code").exactly().systemAndCode("http://loinc.org", "29463-7"))
+				.and(new QuantityClientParam("value-quantity").greaterThan().number(90).andUnits("http://unitsofmeasure.org", "kg"))
+				.and(new StringClientParam("_profile").contains().value(tag))
+				.returnBundle(Bundle.class)
+				.execute();
 		}
 	}
 
@@ -86,23 +138,24 @@ public class Step3_Queries {
 		preLoadEncounters();
 
 		ourTasks.add(new FindAllPatientsWithTagTest());
+		ourTasks.add(new FindAllPatientsWithSpecificNameTest());
+		ourTasks.add(new FindObservationsAboveThreasholdWithTagTest());
 
 		StringBuilder headerRow = new StringBuilder();
 		for (var nextTask : ourTasks) {
-			headerRow.append(nextTask.getName()+"-mdn").append(",");
-			headerRow.append(nextTask.getName()+"-99pct").append(",");
-			headerRow.append(nextTask.getName()+"-75pct").append(",");
+			headerRow.append(nextTask.getName()).append(",");
+//			headerRow.append(nextTask.getName() + "_RES_MEDIAN").append(",");
 		}
 		writeCsvLine(headerRow);
 
-		while(true) {
+		while (true) {
 			StringBuilder csvRow = new StringBuilder();
 			for (var nextTask : ourTasks) {
 				nextTask.run();
-				Snapshot snapshot = nextTask.getHistogram().getSnapshot();
-				csvRow.append(formatNumber(snapshot.getMedian())).append(",");
-				csvRow.append(formatNumber(snapshot.get99thPercentile())).append(",");
-				csvRow.append(formatNumber(snapshot.get75thPercentile())).append(",");
+				Snapshot elapsedSnapshot = nextTask.getElapsedMillisHistogram().getSnapshot();
+				Snapshot resultsSnapshot = nextTask.getResultsHistogram().getSnapshot();
+				csvRow.append(formatNumber(elapsedSnapshot.getMedian())).append(",");
+//				csvRow.append(formatNumber(resultsSnapshot.getMedian())).append(",");
 			}
 			writeCsvLine(csvRow);
 		}
@@ -157,7 +210,7 @@ public class Step3_Queries {
 			outcome.getEntry()
 				.stream()
 				.map(t -> ((Patient) t.getResource()).getNameFirstRep())
-				.map(t -> Pair.of(t.getFamily(), t.getGivenAsSingleString()))
+				.map(t -> Pair.of(t.getGivenAsSingleString(), t.getFamily()))
 				.forEach(t -> ourNamePairs.add(t));
 			if (outcome.getLink(Constants.LINK_NEXT) != null) {
 				ourLog.info("Loading next page of Patients");
