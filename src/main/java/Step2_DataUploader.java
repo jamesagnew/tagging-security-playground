@@ -3,7 +3,6 @@ import ca.uhn.fhir.jpa.search.reindex.ResourceReindexingSvcImpl;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
 import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
-import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
 import ca.uhn.fhir.util.StopWatch;
 import com.google.common.collect.Lists;
 import org.apache.commons.io.FileUtils;
@@ -50,7 +49,7 @@ public class Step2_DataUploader {
 	private static class UploadTask implements Callable<Void> {
 		private final IGenericClient myClient;
 		private final Bundle myInputBundle;
-		private final int myBytesRead;
+		private final long myBytesRead;
 		private final long myTotalBytes;
 		private final StopWatch mySw;
 		private final int myFinalFileIndex;
@@ -58,7 +57,7 @@ public class Step2_DataUploader {
 		private final ExecutorService myExecutor;
 		private int myRetryCount = 0;
 
-		public UploadTask(IGenericClient theClient, Bundle theInputBundle, int theBytesRead, long theTotalBytes, StopWatch theSw, int theFinalFileIndex, Queue<Future<?>> theFutures, ExecutorService theExecutor) {
+		public UploadTask(IGenericClient theClient, Bundle theInputBundle, long theBytesRead, long theTotalBytes, StopWatch theSw, int theFinalFileIndex, Queue<Future<?>> theFutures, ExecutorService theExecutor) {
 			myClient = theClient;
 			myInputBundle = theInputBundle;
 			myBytesRead = theBytesRead;
@@ -159,7 +158,7 @@ public class Step2_DataUploader {
 								}
 								if (isNotBlank(nextLine)) {
 									int finalFileIndex = fileIndex;
-									int bytesRead = countingInputStream.getCount();
+									long bytesRead = countingInputStream.getByteCount();
 
 									if (finalFileIndex % 10 == 0) {
 										ourLog.debug("Reading resource {} ({}) - Reading {}/sec", finalFileIndex, theFilename, sw.formatThroughput(finalFileIndex, TimeUnit.SECONDS));
