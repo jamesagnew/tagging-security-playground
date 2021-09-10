@@ -1,8 +1,10 @@
 import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
 import ca.uhn.fhir.rest.api.Constants;
 import ca.uhn.fhir.rest.client.api.IGenericClient;
 import ca.uhn.fhir.rest.client.interceptor.BasicAuthInterceptor;
 import ca.uhn.fhir.rest.gclient.QuantityClientParam;
+import ca.uhn.fhir.rest.gclient.ReferenceClientParam;
 import ca.uhn.fhir.rest.gclient.StringClientParam;
 import ca.uhn.fhir.rest.gclient.TokenClientParam;
 import com.codahale.metrics.Histogram;
@@ -12,6 +14,7 @@ import com.codahale.metrics.Snapshot;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
 import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.DateTimeType;
 import org.hl7.fhir.r4.model.Encounter;
 import org.hl7.fhir.r4.model.Patient;
 import org.slf4j.Logger;
@@ -129,6 +132,53 @@ public class Step3_Queries {
 		}
 	}
 
+	static class FindEncountersForProviderWithPatientTag extends BaseTest {
+
+		@Override
+		String getName() {
+			return "ENCS_FOR_PROVIDER_WITH_PT_TAG";
+		}
+
+		@Override
+		protected Bundle doExecuteQuery() {
+			String tag = PlaygroundConstants.randomTag();
+			Encounter encounter = ourEncounters.get((int) ((double) ourEncounters.size() * Math.random()));
+			String practitioner = encounter.getParticipantFirstRep().getIndividual().getReference();
+
+			return ourClient
+				.search()
+				.forResource("Encounter")
+				.where(new ReferenceClientParam("practitioner").hasId(practitioner))
+				.and(new StringClientParam("_profile").contains().value(tag))
+				.returnBundle(Bundle.class)
+				.execute();
+		}
+	}
+
+	static class FindEncountersOnDateWithPatientTag extends BaseTest {
+
+		@Override
+		String getName() {
+			return "ENCS_ON_DATE_WITH_PT_TAG";
+		}
+
+		@Override
+		protected Bundle doExecuteQuery() {
+			String tag = PlaygroundConstants.randomTag();
+			Encounter encounter = ourEncounters.get((int) ((double) ourEncounters.size() * Math.random()));
+			DateTimeType encounterStart = new DateTimeType(encounter.getPeriod().getStartElement().asStringValue());
+			encounterStart.setPrecision(TemporalPrecisionEnum.DAY);
+
+			return ourClient
+				.search()
+				.forResource("Encounter")
+				.where(new ReferenceClientParam("date").hasId(encounterStart.getValueAsString()))
+				.and(new StringClientParam("_profile").contains().value(tag))
+				.returnBundle(Bundle.class)
+				.execute();
+		}
+	}
+
 	public static void main(String[] args) {
 		ourCtx.getRestfulClientFactory().setSocketTimeout(10000000);
 		ourClient = ourCtx.newRestfulGenericClient(PlaygroundConstants.FHIR_ENDPOINT_BASE_URL);
@@ -140,6 +190,8 @@ public class Step3_Queries {
 		ourTasks.add(new FindAllPatientsWithTagTest());
 		ourTasks.add(new FindAllPatientsWithSpecificNameTest());
 		ourTasks.add(new FindObservationsAboveThreasholdWithTagTest());
+		ourTasks.add(new FindEncountersForProviderWithPatientTag());
+		ourTasks.add(new FindEncountersOnDateWithPatientTag());
 
 		StringBuilder headerRow = new StringBuilder();
 		for (var nextTask : ourTasks) {
