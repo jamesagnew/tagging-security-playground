@@ -29,7 +29,7 @@ find output/fhir -name "*.json" -exec mv -v {}  ../tagging-security-playground/s
 
 # Stage the Synthea Files
 
-In this step we pre-process the Synthea files to reduce their size and filter their contents to only Patient and Observation resources.
+In this step we pre-process the Synthea files to reduce their size and filter their contents to only Patient, Encounter, and Observation resources. We also assign random tags.
 
 * Navigate to the playground directory
 
@@ -47,5 +47,17 @@ mvn clean compile exec:java -Dexec.mainClass=Step1_FileStager
 
 ```
 echo -n "New: "; find src/main/data/new_synthea_files | wc -l; echo -n "Staged: "; find src/main/data/staged_synthea_files | wc -l; du -h src/main/data/new_synthea_files src/main/data/staged_synthea_files 2>/dev/null
+```
+
+# Upload the Synthea Files
+
+```
+mvn clean compile exec:java -Dexec.mainClass=Step2_DataUploader
+```
+
+# Run the tests
+
+```
+mvn clean compile exec:java -Dexec.mainClass=Step3_Queries
 ```
 
