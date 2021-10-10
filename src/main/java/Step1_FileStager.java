@@ -7,6 +7,7 @@ import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.Validate;
 import org.hl7.fhir.r4.model.Bundle;
 import org.hl7.fhir.r4.model.Encounter;
+import org.hl7.fhir.r4.model.Location;
 import org.hl7.fhir.r4.model.Observation;
 import org.hl7.fhir.r4.model.Organization;
 import org.hl7.fhir.r4.model.Patient;
@@ -224,6 +225,12 @@ public class Step1_FileStager {
 								Practitioner p = (Practitioner) resource;
 								p.getMeta().getProfile().clear();
 								resources.add(p);
+							}
+							case "Location" -> {
+								Location e = (Location) resource;
+								e.getMeta().getProfile().clear();
+								tags.forEach(t -> e.getMeta().addProfile(t));
+								resources.add(e);
 							}
 							case "Organization" -> {
 								Organization p = (Organization) resource;
