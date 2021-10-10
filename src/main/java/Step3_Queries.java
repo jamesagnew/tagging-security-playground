@@ -85,8 +85,8 @@ public class Step3_Queries {
 			return ourClient
 				.search()
 				.forResource("Patient")
-				.where(new StringClientParam("given").contains().value(namePair.getLeft()))
-				.and(new StringClientParam("family").contains().value(namePair.getRight()))
+				.where(new StringClientParam("given").matches().value(namePair.getLeft()))
+				.and(new StringClientParam("family").matches().value(namePair.getRight()))
 				.returnBundle(Bundle.class)
 				.execute();
 		}
@@ -189,7 +189,7 @@ public class Step3_Queries {
 
 		ourTasks.add(new FindAllPatientsWithTagTest());
 		ourTasks.add(new FindAllPatientsWithSpecificNameTest());
-		ourTasks.add(new FindObservationsAboveThreasholdWithTagTest());
+		//ourTasks.add(new FindObservationsAboveThreasholdWithTagTest());
 		ourTasks.add(new FindEncountersForProviderWithPatientTag());
 		ourTasks.add(new FindEncountersOnDateWithPatientTag());
 

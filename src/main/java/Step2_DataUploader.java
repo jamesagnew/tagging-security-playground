@@ -117,7 +117,7 @@ public class Step2_DataUploader {
 		client.registerInterceptor(new BasicAuthInterceptor(PlaygroundConstants.FHIR_ENDPOINT_CREDENTIALS));
 //		client.registerInterceptor(new LoggingInterceptor(false));
 
-		uploadFile(Step1_FileStager.META_FILES_NDJSON_GZ, executor, client);
+		//uploadFile(Step1_FileStager.META_FILES_NDJSON_GZ, executor, client);
 		uploadFile(Step1_FileStager.PATIENT_FILES_NDJSON_GZ, executor, client);
 
 		executor.shutdown();
