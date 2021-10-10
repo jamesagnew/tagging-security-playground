@@ -73,7 +73,7 @@ public class Step2_DataUploader {
 		public Void call() throws Exception {
 			try {
 
-				int active = 0;
+				long active = 0;
 				try {
 					active = ourActiveUploadsCount.incrementAndGet();
 					myClient.transaction().withBundle(myInputBundle).execute();
@@ -83,7 +83,7 @@ public class Step2_DataUploader {
 
 				ourResourcesUploadedCount.addAndGet(myInputBundle.getEntry().size());
 
-				int uploaded = ourUploadedCount.incrementAndGet();
+				long uploaded = ourUploadedCount.incrementAndGet();
 				if (uploaded % 10 == 0) {
 					ourLog.info("Uploaded {} - Have read {} of {} - {} patient/sec, {} res/sec - {} active - ETA: {}", uploaded, FileUtils.byteCountToDisplaySize(myBytesRead), FileUtils.byteCountToDisplaySize(myTotalBytes), mySw.formatThroughput(uploaded, TimeUnit.SECONDS), mySw.formatThroughput(ourResourcesUploadedCount.get(), TimeUnit.SECONDS), active, mySw.getEstimatedTimeRemaining(myBytesRead, myTotalBytes));
 				}
