@@ -32,7 +32,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.GZIPInputStream;
 
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
@@ -42,9 +42,9 @@ public class Step2_DataUploader {
 	private static final Logger ourLog = LoggerFactory.getLogger(Step2_DataUploader.class);
 
 	private static final FhirContext ourCtx = FhirContext.forR4Cached();
-	private static final AtomicInteger ourUploadedCount = new AtomicInteger(0);
-	private static final AtomicInteger ourResourcesUploadedCount = new AtomicInteger(0);
-	private static final AtomicInteger ourActiveUploadsCount = new AtomicInteger(0);
+	private static final AtomicLong ourUploadedCount = new AtomicLong(0);
+	private static final AtomicLong ourResourcesUploadedCount = new AtomicLong(0);
+	private static final AtomicLong ourActiveUploadsCount = new AtomicLong(0);
 	private static LinkedBlockingQueue<Runnable> ourWorkQueue;
 
 	private static class UploadTask implements Callable<Void> {
@@ -172,7 +172,7 @@ public class Step2_DataUploader {
 									if (theFilename.equals(Step1_FileStager.META_FILES_NDJSON_GZ)) {
 										try {
 											List<List<Bundle.BundleEntryComponent>> entryPartitions = Lists.partition(inputBundle.getEntry(), 100);
-											TreeMap<String, AtomicInteger> responseToCount = new TreeMap<>();
+											TreeMap<String, AtomicLong> responseToCount = new TreeMap<>();
 											for (int i = 0; i < entryPartitions.size(); i++) {
 												Bundle partitionBundle = new Bundle();
 												partitionBundle.setType(Bundle.BundleType.TRANSACTION);
@@ -183,7 +183,7 @@ public class Step2_DataUploader {
 													.getEntry()
 													.stream()
 													.map(t -> t.getResponse().getStatus())
-													.forEach(t -> responseToCount.computeIfAbsent(t, o -> new AtomicInteger(0)).incrementAndGet());
+													.forEach(t -> responseToCount.computeIfAbsent(t, o -> new AtomicLong(0)).incrementAndGet());
 
 											}
 											ourLog.info("Meta upload outcomes: {}", responseToCount);
