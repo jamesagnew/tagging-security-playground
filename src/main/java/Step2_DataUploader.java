@@ -46,6 +46,8 @@ public class Step2_DataUploader {
 	private static final AtomicLong ourResourcesUploadedCount = new AtomicLong(0);
 	private static final AtomicLong ourActiveUploadsCount = new AtomicLong(0);
 	private static LinkedBlockingQueue<Runnable> ourWorkQueue;
+	private static int ourSkip;
+	private static long ourSkipBytes;
 
 	private static class UploadTask implements Callable<Void> {
 		private final IGenericClient myClient;
@@ -112,6 +114,10 @@ public class Step2_DataUploader {
 	}
 
 	public static void main(String[] args) throws Exception {
+
+		String skipString = System.getProperty("skip", "0");
+		ourSkip = Integer.parseInt(skipString);
+
 		ourWorkQueue = new LinkedBlockingQueue<>(5000);
 		ExecutorService executor = new ThreadPoolExecutor(10, 10, 0L, TimeUnit.MILLISECONDS, ourWorkQueue, new ResourceReindexingSvcImpl.BlockPolicy());
 
@@ -160,11 +166,20 @@ public class Step2_DataUploader {
 									break;
 								}
 								if (isNotBlank(nextLine)) {
+									fileIndex++;
+									if (fileIndex < ourSkip) {
+										continue;
+									}
 									int finalFileIndex = fileIndex;
 									long bytesRead = countingInputStream.getByteCount();
 
+									if (fileIndex == ourSkip) {
+										sw.restart();
+										ourSkipBytes = bytesRead;
+									}
+
 									if (finalFileIndex % 10 == 0) {
-										ourLog.debug("Reading resource {} ({}) - Reading {}/sec", finalFileIndex, theFilename, sw.formatThroughput(finalFileIndex, TimeUnit.SECONDS));
+										ourLog.debug("Reading resource {} ({}) - Reading {}/sec", finalFileIndex, theFilename, sw.formatThroughput(finalFileIndex - ourSkip, TimeUnit.SECONDS));
 									}
 
 									Bundle inputBundle = ourCtx.newJsonParser().parseResource(Bundle.class, nextLine);
@@ -198,14 +213,13 @@ public class Step2_DataUploader {
 										continue;
 									}
 
-									Callable<Void> task = new UploadTask(client, inputBundle, bytesRead, totalBytes, sw, finalFileIndex, futures, executor);
+									Callable<Void> task = new UploadTask(client, inputBundle, bytesRead - ourSkipBytes, totalBytes - ourSkipBytes, sw, finalFileIndex, futures, executor);
 									futures.add(executor.submit(task));
 
 									while (futures.size() > 1000) {
 										futures.poll().get();
 									}
 
-									fileIndex++;
 								}
 							}
 						}
